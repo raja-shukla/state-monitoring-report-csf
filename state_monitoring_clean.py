@@ -26,7 +26,7 @@ def read_any_csv(upload) -> pd.DataFrame:
             df = pd.read_csv(BytesIO(raw), sep=sep)
             if df.shape[1] > 1:
                 return df
-        except Exception:
+        except:
             pass
     return pd.read_csv(BytesIO(raw))
 
@@ -143,7 +143,6 @@ def export_excel(report_df):
         ws = writer.sheets["Report"]
         wb = writer.book
 
-        # 3-colour scale on Total %
         if "Total %" in report_df.columns:
             col = report_df.columns.get_loc("Total %")
             start = 2
@@ -160,7 +159,6 @@ def export_excel(report_df):
                 },
             )
 
-        # Bold header
         header_fmt = wb.add_format({"bold": True})
         ws.set_row(0, None, header_fmt)
 
@@ -169,16 +167,11 @@ def export_excel(report_df):
 
 
 # ------------------------------------------------------------
-# Streamlit UI (CSF-ish styling)
+# Streamlit UI (CSF styling)
 # ------------------------------------------------------------
 
-st.set_page_config(
-    page_title="State Monitoring Report",
-    page_icon=None,
-    layout="wide"
-)
+st.set_page_config(page_title="State Monitoring Report", layout="wide")
 
-# Custom CSS – CSF-style colours (deep blue + teal + clean background)
 st.markdown(
     """
     <style>
@@ -186,42 +179,36 @@ st.markdown(
         background-color: #F5F7FB;
     }
     div.block-container {
-        padding-top: 1.2rem;
+        padding-top: 3.5rem;        /* FIXED: More space at the top */
         padding-bottom: 1.2rem;
         max-width: 1200px;
     }
     .csf-title {
-        font-size: 2.2rem;
+        font-size: 2.4rem;
         font-weight: 700;
-        color: #0054A6; /* deep blue */
-        margin-bottom: 0.15rem;
+        color: #0054A6;
+        margin-bottom: 0.4rem;
     }
     .csf-subtitle {
-        font-size: 0.95rem;
+        font-size: 1rem;
         color: #4B4B4B;
-        margin-bottom: 1.1rem;
+        margin-bottom: 1rem;
     }
-    /* Buttons */
     .stButton>button {
         background: linear-gradient(90deg,#0054A6,#00A8E8);
         color: white;
         border-radius: 999px;
         border: none;
-        padding: 0.4rem 1.4rem;
+        padding: 0.45rem 1.5rem;
         font-weight: 600;
-        letter-spacing: 0.02em;
+        font-size: 0.95rem;
     }
     .stButton>button:hover {
         filter: brightness(1.05);
     }
-    /* Selectbox border rounding */
     .stSelectbox>div>div>div {
         border-radius: 999px !important;
         border-color: #0054A655 !important;
-    }
-    /* File uploader card feel */
-    .uploadedFile, .stFileUploader>div>div {
-        border-radius: 12px !important;
     }
     </style>
     """,
@@ -231,13 +218,11 @@ st.markdown(
 # Title
 st.markdown('<div class="csf-title">State Monitoring Report</div>', unsafe_allow_html=True)
 st.markdown(
-    '<div class="csf-subtitle">'
-    'Upload the latest district, block and cluster monitoring CSVs and generate a clean, ready-to-share report.'
-    '</div>',
+    '<div class="csf-subtitle">Upload district, block and cluster monitoring CSVs to generate a ready-to-share FLN monitoring report.</div>',
     unsafe_allow_html=True,
 )
 
-# Uploaders
+# File uploaders
 c1, c2, c3 = st.columns(3)
 with c1:
     f1 = st.file_uploader("District CSV (DPC/APC/DIET)", type=["csv"])
@@ -247,7 +232,6 @@ with c3:
     f3 = st.file_uploader("Cluster CSV (CAC)", type=["csv"])
 
 if f1 and f2 and f3:
-    st.markdown("### Report configuration")
     report_type = st.selectbox(
         "Choose report type",
         ["State Summary Report", "Cadre-wise Report"],
@@ -274,7 +258,7 @@ if f1 and f2 and f3:
             "Download Excel report",
             excel_bytes,
             file_name="State_Monitoring_Report.xlsx",
-            type="primary",
         )
+
 else:
     st.info("Upload all three CSVs to view and download reports.")
