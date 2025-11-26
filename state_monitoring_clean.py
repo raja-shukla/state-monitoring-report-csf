@@ -26,7 +26,7 @@ def read_any_csv(upload) -> pd.DataFrame:
             df = pd.read_csv(BytesIO(raw), sep=sep)
             if df.shape[1] > 1:
                 return df
-        except:
+        except Exception:
             pass
     return pd.read_csv(BytesIO(raw))
 
@@ -72,6 +72,7 @@ def build_state_summary(all_df):
         g["completed_visit"] / g["total_visit_target"].replace(0, pd.NA) * 100
     ).round(2).fillna(0)
 
+    # sort best → worst
     g = g.sort_values("% Completed", ascending=False)
     g["Rank"] = range(1, len(g) + 1)
 
@@ -80,6 +81,9 @@ def build_state_summary(all_df):
         "total_visit_target": "Total Target",
         "completed_visit": "Total Completed"
     })
+
+    # 🟦 Put Rank as FIRST column (like cadre-wise)
+    g = g[["Rank", "District Name", "Total Target", "Total Completed", "% Completed"]]
 
     return g
 
@@ -136,6 +140,11 @@ def build_cadre_report(df_district, df_block, df_cluster):
 # ------------------------------------------------------------
 
 def export_excel(report_df):
+    """
+    Apply colour scale to:
+    - 'Total %' (cadre-wise), OR
+    - '% Completed' (state summary)
+    """
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="xlsxwriter") as writer:
         report_df.to_excel(writer, index=False, sheet_name="Report")
@@ -143,11 +152,18 @@ def export_excel(report_df):
         ws = writer.sheets["Report"]
         wb = writer.book
 
+        # Decide which column to colour
+        pct_col_name = None
         if "Total %" in report_df.columns:
-            col = report_df.columns.get_loc("Total %")
+            pct_col_name = "Total %"
+        elif "% Completed" in report_df.columns:
+            pct_col_name = "% Completed"
+
+        if pct_col_name is not None:
+            col_idx = report_df.columns.get_loc(pct_col_name)
             start = 2
             end = len(report_df) + 1
-            col_letter = chr(ord("A") + col)
+            col_letter = chr(ord("A") + col_idx)
             ws.conditional_format(
                 f"{col_letter}{start}:{col_letter}{end}",
                 {
@@ -179,7 +195,7 @@ st.markdown(
         background-color: #F5F7FB;
     }
     div.block-container {
-        padding-top: 3.5rem;        /* FIXED: More space at the top */
+        padding-top: 3.5rem;
         padding-bottom: 1.2rem;
         max-width: 1200px;
     }
