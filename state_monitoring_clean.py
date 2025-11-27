@@ -7,6 +7,7 @@ from io import BytesIO
 # ------------------------------------------------------------
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Lowercase + snake_case column names."""
     df2 = df.copy()
     new_cols = []
     for c in df.columns:
@@ -20,6 +21,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def read_any_csv(upload) -> pd.DataFrame:
+    """Try a few separators, fall back to default."""
     raw = upload.read()
     for sep in [",", ";", "\t", "|"]:
         try:
@@ -43,26 +45,45 @@ def pick_column(df: pd.DataFrame, candidates):
     return None
 
 
-def ensure_schema(df_raw):
+def ensure_schema(df_raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    Standardise to columns:
+    - district
+    - target
+    - done
+    - role
+    """
     df = normalize_columns(df_raw)
 
-    district_col = pick_column(df, ["district", "jila", "zilla"])
-    target_col   = pick_column(df, ["target", "visit_target", "total_target"])
-    done_col     = pick_column(df, ["done", "completed", "visits_done", "achievement"])
+    district_col = pick_column(df, ["district_name", "district"])
+    target_col   = pick_column(df, ["targeted_visits", "target", "visit_target", "total_target"])
+    done_col     = pick_column(df, ["completed", "done", "visits_done", "achievement"])
+    role_col     = pick_column(df, ["role_name", "role", "cadre", "post", "designation"])
 
     out = pd.DataFrame()
     out["district"] = df[district_col].astype(str).str.strip() if district_col else ""
-    out["target"]   = pd.to_numeric(df[target_col].astype(str).str.replace(",", ""), errors="coerce").fillna(0) if target_col else 0
-    out["done"]     = pd.to_numeric(df[done_col].astype(str).str.replace(",", ""), errors="coerce").fillna(0) if done_col else 0
+    out["target"]   = pd.to_numeric(df[target_col], errors="coerce").fillna(0) if target_col else 0
+    out["done"]     = pd.to_numeric(df[done_col], errors="coerce").fillna(0) if done_col else 0
+    out["role"]     = df[role_col].astype(str).str.strip() if role_col else ""
 
     return out
+
+
+def canon_role(s: str) -> str:
+    """Canonical form for role strings."""
+    s = str(s).strip().lower()
+    for ch in [" ", "/", "\\", "-", ".", "(", ")", ","]:
+        s = s.replace(ch, "_")
+    s = "".join(ch for ch in s if ch.isalnum() or ch == "_")
+    return s
 
 
 # ------------------------------------------------------------
 # Report builders
 # ------------------------------------------------------------
 
-def build_state_summary(all_df):
+def build_state_summary(all_df: pd.DataFrame) -> pd.DataFrame:
+    """District-wise overall target vs completed (all roles combined)."""
     g = all_df.groupby("district").agg(
         total_visit_target=("target", "sum"),
         completed_visit=("done", "sum")
@@ -72,7 +93,6 @@ def build_state_summary(all_df):
         g["completed_visit"] / g["total_visit_target"].replace(0, pd.NA) * 100
     ).round(2).fillna(0)
 
-    # sort best → worst
     g = g.sort_values("% Completed", ascending=False)
     g["Rank"] = range(1, len(g) + 1)
 
@@ -82,54 +102,137 @@ def build_state_summary(all_df):
         "completed_visit": "Total Completed"
     })
 
-    # 🟦 Put Rank as FIRST column (like cadre-wise)
     g = g[["Rank", "District Name", "Total Target", "Total Completed", "% Completed"]]
-
     return g
 
 
-def _agg(df, label):
-    g = df.groupby("district").agg(
-        target=("target", "sum"),
-        done=("done", "sum"),
-    ).reset_index()
+def aggregate_roles(df: pd.DataFrame, role_patterns: dict) -> pd.DataFrame:
+    """
+    df: has columns district, target, done, role
+    role_patterns: { label: [pattern1, pattern2,...] }
 
-    g[f"{label} Target"] = g["target"]
-    g[f"{label} Completed"] = g["done"]
-    g[f"{label} %"] = (g["done"] / g["target"].replace(0, pd.NA) * 100).round(2).fillna(0)
+    Returns a df with district + for each label:
+    <label> Target, <label> Completed, <label> %
+    """
+    df2 = df.copy()
+    df2["role_key"] = df2["role"].apply(canon_role)
 
-    return g[["district", f"{label} Target", f"{label} Completed", f"{label} %"]]
+    base = df2[["district"]].drop_duplicates().reset_index(drop=True)
+
+    for label, patterns in role_patterns.items():
+        def match_any(x):
+            for p in patterns:
+                if p in x:
+                    return True
+            return False
+
+        mask = df2["role_key"].apply(match_any)
+        grp = df2[mask].groupby("district").agg(
+            target=("target", "sum"),
+            done=("done", "sum")
+        ).reset_index()
+
+        base = base.merge(grp, on="district", how="left")
+        base[f"{label} Target"] = base["target"].fillna(0)
+        base[f"{label} Completed"] = base["done"].fillna(0)
+        base[f"{label} %"] = (
+            base[f"{label} Completed"]
+            / base[f"{label} Target"].replace(0, pd.NA) * 100
+        ).round(2).fillna(0)
+
+        base = base.drop(columns=["target", "done"], errors="ignore")
+
+    return base
 
 
-def build_cadre_report(df_district, df_block, df_cluster):
-    dpc = _agg(df_district, "DPC+APC+DIET")
-    brc = _agg(df_block,    "BAC+BRC")
-    cac = _agg(df_cluster,  "CAC")
+def build_cadre_report(df_district_raw, df_block_raw, df_cluster_raw) -> pd.DataFrame:
+    """
+    Cadre-wise report with SEPARATE columns for:
+    - DPC
+    - DIET Principal
+    - DIET Academic
+    - APC
+    - BRCC (from BRC in block file)
+    - BAC
+    - CAC
+    Each has Target, Completed, %.
+    Also computes Total Target, Total Completed, Total % and Rank.
+    """
+    df_district = ensure_schema(df_district_raw)
+    df_block = ensure_schema(df_block_raw)
+    df_cluster = ensure_schema(df_cluster_raw)
 
-    m = dpc.merge(brc, on="district", how="outer").merge(cac, on="district", how="outer")
+    # --- District-level roles (based on your District.csv) ---
+    # Raw role values (canon_role) are: dpc, diet_principal, apc, diet_academic
+    district_roles = {
+        "DPC": ["dpc"],
+        "DIET Principal": ["diet_principal"],
+        "DIET Academic": ["diet_academic"],
+        "APC": ["apc"],
+    }
 
+    # --- Block-level roles (based on Block (2).csv) ---
+    # Raw roles: BAC, BRC  -> canon: bac, brc
+    block_roles = {
+        "BRCC": ["brc"],  # BRC in raw treated as BRCC in report
+        "BAC": ["bac"],
+    }
+
+    # --- Cluster-level roles (Cluster (3).csv) ---
+    # Raw role: CAC
+    cluster_roles = {
+        "CAC": ["cac"],
+    }
+
+    # Aggregate each level
+    dpart = aggregate_roles(df_district, district_roles)
+    bpart = aggregate_roles(df_block, block_roles)
+    cpart = aggregate_roles(df_cluster, cluster_roles)
+
+    # Merge all role parts on district
+    m = dpart.merge(bpart, on="district", how="outer").merge(cpart, on="district", how="outer")
+
+    # Ensure numeric
     for c in m.columns:
         if c != "district":
             m[c] = pd.to_numeric(m[c], errors="coerce").fillna(0)
 
-    m["Total Target"] = m["DPC+APC+DIET Target"] + m["BAC+BRC Target"] + m["CAC Target"]
-    m["Total Completed"] = m["DPC+APC+DIET Completed"] + m["BAC+BRC Completed"] + m["CAC Completed"]
-    m["Total %"] = (m["Total Completed"] / m["Total Target"].replace(0, pd.NA) * 100).round(2).fillna(0)
+    # Overall totals across all roles
+    role_labels = ["DPC", "DIET Principal", "DIET Academic", "APC", "BRCC", "BAC", "CAC"]
 
+    total_target = 0
+    total_done = 0
+    for r in role_labels:
+        total_target += m.get(f"{r} Target", 0)
+        total_done += m.get(f"{r} Completed", 0)
+
+    m["Total Target"] = total_target
+    m["Total Completed"] = total_done
+    m["Total %"] = (
+        m["Total Completed"]
+        / m["Total Target"].replace(0, pd.NA) * 100
+    ).round(2).fillna(0)
+
+    # Rank by Total %
     m = m.sort_values("Total %", ascending=False)
     m["Rank"] = range(1, len(m) + 1)
 
     m = m.rename(columns={"district": "District Name"})
 
+    # Final column order (DIET Academic & APC separate)
     final_cols = [
         "Rank",
         "District Name",
-        "DPC+APC+DIET %",
-        "BAC+BRC Target", "BAC+BRC Completed", "BAC+BRC %",
-        "CAC %",
+        "DPC Target", "DPC Completed", "DPC %",
+        "DIET Principal Target", "DIET Principal Completed", "DIET Principal %",
+        "DIET Academic Target", "DIET Academic Completed", "DIET Academic %",
+        "APC Target", "APC Completed", "APC %",
+        "BRCC Target", "BRCC Completed", "BRCC %",
+        "BAC Target", "BAC Completed", "BAC %",
+        "CAC Target", "CAC Completed", "CAC %",
         "Total Target", "Total Completed", "Total %",
     ]
-
+    final_cols = [c for c in final_cols if c in m.columns]
     m = m[final_cols]
 
     return m
@@ -139,7 +242,7 @@ def build_cadre_report(df_district, df_block, df_cluster):
 # Excel export
 # ------------------------------------------------------------
 
-def export_excel(report_df):
+def export_excel(report_df: pd.DataFrame) -> bytes:
     """
     Apply colour scale to:
     - 'Total %' (cadre-wise), OR
@@ -152,7 +255,6 @@ def export_excel(report_df):
         ws = writer.sheets["Report"]
         wb = writer.book
 
-        # Decide which column to colour
         pct_col_name = None
         if "Total %" in report_df.columns:
             pct_col_name = "Total %"
@@ -241,9 +343,9 @@ st.markdown(
 # File uploaders
 c1, c2, c3 = st.columns(3)
 with c1:
-    f1 = st.file_uploader("District CSV (DPC/APC/DIET)", type=["csv"])
+    f1 = st.file_uploader("District CSV (DPC / DIET / APC)", type=["csv"])
 with c2:
-    f2 = st.file_uploader("Block CSV (BAC/BRC)", type=["csv"])
+    f2 = st.file_uploader("Block CSV (BAC / BRC)", type=["csv"])
 with c3:
     f3 = st.file_uploader("Cluster CSV (CAC)", type=["csv"])
 
@@ -255,16 +357,20 @@ if f1 and f2 and f3:
     )
 
     if st.button("Generate report"):
-        df1 = ensure_schema(read_any_csv(f1))
-        df2 = ensure_schema(read_any_csv(f2))
-        df3 = ensure_schema(read_any_csv(f3))
+        df1_raw = read_any_csv(f1)
+        df2_raw = read_any_csv(f2)
+        df3_raw = read_any_csv(f3)
 
-        all_df = pd.concat([df1, df2, df3], ignore_index=True)
+        # For state summary we just need standardised schema
+        df1 = ensure_schema(df1_raw)
+        df2 = ensure_schema(df2_raw)
+        df3 = ensure_schema(df3_raw)
 
         if report_type == "State Summary Report":
+            all_df = pd.concat([df1, df2, df3], ignore_index=True)
             report = build_state_summary(all_df)
         else:
-            report = build_cadre_report(df1, df2, df3)
+            report = build_cadre_report(df1_raw, df2_raw, df3_raw)
 
         st.markdown("### Generated report")
         st.dataframe(report, use_container_width=True)
