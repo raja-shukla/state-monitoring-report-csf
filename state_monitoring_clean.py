@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from io import BytesIO
+import numpy as np
 
 # ------------------------------------------------------------
 # Helpers (no regex)
@@ -15,6 +16,7 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         for ch in [" ", "/", "\\", "-", ".", "(", ")", ":", ","]:
             s = s.replace(ch, "_")
         s = "".join(ch for ch in s if ch.isalnum() or ch == "_")
+            # s will be our canon column name
         new_cols.append(s)
     df2.columns = new_cols
     return df2
@@ -89,9 +91,10 @@ def build_state_summary(all_df: pd.DataFrame) -> pd.DataFrame:
         completed_visit=("done", "sum")
     ).reset_index()
 
-    g["% Completed"] = (
-        g["completed_visit"] / g["total_visit_target"].replace(0, pd.NA) * 100
-    ).round(2).fillna(0)
+    # Safe % calculation (no pd.NA)
+    den = g["total_visit_target"].astype(float).replace(0, np.nan)
+    num = g["completed_visit"].astype(float)
+    g["% Completed"] = (num * 100.0 / den).round(2).replace([np.nan, np.inf, -np.inf], 0)
 
     g = g.sort_values("% Completed", ascending=False)
     g["Rank"] = range(1, len(g) + 1)
@@ -133,12 +136,19 @@ def aggregate_roles(df: pd.DataFrame, role_patterns: dict) -> pd.DataFrame:
         ).reset_index()
 
         base = base.merge(grp, on="district", how="left")
-        base[f"{label} Target"] = base["target"].fillna(0)
-        base[f"{label} Completed"] = base["done"].fillna(0)
-        base[f"{label} %"] = (
-            base[f"{label} Completed"]
-            / base[f"{label} Target"].replace(0, pd.NA) * 100
-        ).round(2).fillna(0)
+
+        tgt_col = f"{label} Target"
+        done_col = f"{label} Completed"
+
+        base[tgt_col] = pd.to_numeric(base["target"], errors="coerce").fillna(0).astype(float)
+        base[done_col] = pd.to_numeric(base["done"], errors="coerce").fillna(0).astype(float)
+
+        den = base[tgt_col].replace(0, np.nan)
+        num = base[done_col]
+        pct = (num * 100.0 / den)
+        pct = pct.round(2).replace([np.nan, np.inf, -np.inf], 0)
+
+        base[f"{label} %"] = pct
 
         base = base.drop(columns=["target", "done"], errors="ignore")
 
@@ -162,8 +172,7 @@ def build_cadre_report(df_district_raw, df_block_raw, df_cluster_raw) -> pd.Data
     df_block = ensure_schema(df_block_raw)
     df_cluster = ensure_schema(df_cluster_raw)
 
-    # --- District-level roles (based on your District.csv) ---
-    # Raw role values (canon_role) are: dpc, diet_principal, apc, diet_academic
+    # --- District-level roles (from District.csv) ---
     district_roles = {
         "DPC": ["dpc"],
         "DIET Principal": ["diet_principal"],
@@ -171,15 +180,13 @@ def build_cadre_report(df_district_raw, df_block_raw, df_cluster_raw) -> pd.Data
         "APC": ["apc"],
     }
 
-    # --- Block-level roles (based on Block (2).csv) ---
-    # Raw roles: BAC, BRC  -> canon: bac, brc
+    # --- Block-level roles (from Block (2).csv) ---
     block_roles = {
-        "BRCC": ["brc"],  # BRC in raw treated as BRCC in report
+        "BRCC": ["brc"],  # BRC in raw treated as BRCC
         "BAC": ["bac"],
     }
 
-    # --- Cluster-level roles (Cluster (3).csv) ---
-    # Raw role: CAC
+    # --- Cluster-level roles (from Cluster (3).csv) ---
     cluster_roles = {
         "CAC": ["cac"],
     }
@@ -192,10 +199,10 @@ def build_cadre_report(df_district_raw, df_block_raw, df_cluster_raw) -> pd.Data
     # Merge all role parts on district
     m = dpart.merge(bpart, on="district", how="outer").merge(cpart, on="district", how="outer")
 
-    # Ensure numeric
+    # Ensure numeric for all measure columns
     for c in m.columns:
         if c != "district":
-            m[c] = pd.to_numeric(m[c], errors="coerce").fillna(0)
+            m[c] = pd.to_numeric(m[c], errors="coerce").fillna(0).astype(float)
 
     # Overall totals across all roles
     role_labels = ["DPC", "DIET Principal", "DIET Academic", "APC", "BRCC", "BAC", "CAC"]
@@ -208,10 +215,10 @@ def build_cadre_report(df_district_raw, df_block_raw, df_cluster_raw) -> pd.Data
 
     m["Total Target"] = total_target
     m["Total Completed"] = total_done
-    m["Total %"] = (
-        m["Total Completed"]
-        / m["Total Target"].replace(0, pd.NA) * 100
-    ).round(2).fillna(0)
+
+    den = m["Total Target"].replace(0, np.nan)
+    num = m["Total Completed"]
+    m["Total %"] = (num * 100.0 / den).round(2).replace([np.nan, np.inf, -np.inf], 0)
 
     # Rank by Total %
     m = m.sort_values("Total %", ascending=False)
